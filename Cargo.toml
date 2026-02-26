@@ -1,0 +1,16 @@
+[package]
+name = "auria-settlement"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/auria-core/auria-runtime"
+authors = ["AURIA Team <auria@dust.llc>"]
+description = "AURIA Runtime Core - Usage accounting and settlement"
+
+[dependencies]
+auria-core = { path = "../auria-core", version = "0.1.0"}
+auria-security = { path = "../auria-security", version = "0.1.0"}
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+sha3 = "0.10"

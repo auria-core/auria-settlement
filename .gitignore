@@ -1,0 +1,36 @@
+# Build artifacts
+/target
+debug/
+release/
+incremental/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration
+.env
+.env.local
+*.local.toml
+
+# Log files
+*.log
+
+# Cache directories
+.cache/
+
+# Cargo lock (optional - may want to keep for reproducible builds)
+# Cargo.lock
+
+# Build artifacts
+**/*.rlib
+**/*.so
+**/*.dylib
+**/*.dll
