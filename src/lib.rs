@@ -1,4 +1,5 @@
-use auria_core::{AuriaResult, Hash, RequestId, Signature, UsageReceipt};
+use auria_core::{AuriaResult, Hash, UsageReceipt};
+use sha3::{Digest, Keccak256};
 
 pub struct SettlementClient {
     receipts: Vec<UsageReceipt>,
@@ -15,7 +16,10 @@ impl SettlementClient {
         self.receipts.push(receipt.clone());
         let data = serde_json::to_vec(&receipt)
             .map_err(|e| auria_core::AuriaError::SerializationError(e.to_string()))?;
-        Ok(sha3::Keccak256::hash(&data))
+        let hash = Keccak256::digest(&data);
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&hash);
+        Ok(Hash(result))
     }
 
     pub fn submit_settlement(&self, _root_hash: Hash) -> AuriaResult<()> {
@@ -31,7 +35,10 @@ impl SettlementClient {
             .iter()
             .map(|r| {
                 let data = serde_json::to_vec(r).unwrap_or_default();
-                sha3::Keccak256::hash(&data)
+                let hash = Keccak256::digest(&data);
+                let mut result = [0u8; 32];
+                result.copy_from_slice(&hash);
+                Hash(result)
             })
             .collect();
         while hashes.len() > 1 {
@@ -44,7 +51,10 @@ impl SettlementClient {
                     let mut combined = Vec::new();
                     combined.extend_from_slice(&chunk[0].0);
                     combined.extend_from_slice(&chunk[1].0);
-                    sha3::Keccak256::hash(&combined)
+                    let hash = Keccak256::digest(&combined);
+                    let mut result = [0u8; 32];
+                    result.copy_from_slice(&hash);
+                    Hash(result)
                 })
                 .collect();
         }
