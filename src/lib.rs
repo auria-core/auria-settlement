@@ -1,3 +1,10 @@
+// File: lib.rs - This file is part of AURIA
+// Copyright (c) 2026 AURIA Developers and Contributors
+// Description:
+//     Usage accounting and settlement for AURIA Runtime Core.
+//     Generates usage receipts and builds Merkle trees for settlement proof,
+//     enabling economic attribution and royalty distribution.
+//
 use auria_core::{AuriaResult, Hash, UsageReceipt};
 use sha3::{Digest, Keccak256};
 
