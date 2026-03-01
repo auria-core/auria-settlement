@@ -5,23 +5,21 @@
 //     Generates usage receipts and builds Merkle trees for settlement proof,
 //     enabling economic attribution and royalty distribution.
 //
-use auria_core::{AuriaError, AuriaResult, Hash, RequestId, ShardId, UsageReceipt, UsageStats, ExpertId};
+use auria_core::{AuriaError, AuriaResult, Hash, RequestId, ShardId, UsageReceipt, UsageStats, ExpertId, PublicKey, Signature};
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone)]
-pub struct SettlementClient {
-    receipts: Arc<RwLock<Vec<UsageReceipt>>>,
-    settlement_config: SettlementConfig,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettlementConfig {
     pub settlement_interval_seconds: u64,
     pub min_receipts_for_settlement: u32,
+    pub token_price_usd: f64,
+    pub royalty_percentage: f32,
+    pub settlement_contract: Option<String>,
 }
 
 impl Default for SettlementConfig {
@@ -29,15 +27,91 @@ impl Default for SettlementConfig {
         Self {
             settlement_interval_seconds: 3600,
             min_receipts_for_settlement: 10,
+            token_price_usd: 0.001,
+            royalty_percentage: 0.05,
+            settlement_contract: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Payment {
+    pub payment_id: String,
+    pub recipient: PublicKey,
+    pub amount: u64,
+    pub token_count: u32,
+    pub status: PaymentStatus,
+    pub created_at: u64,
+    pub settled_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PaymentStatus {
+    Pending,
+    Processing,
+    Completed,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EscrowAccount {
+    pub account_id: String,
+    pub owner: PublicKey,
+    pub balance: u64,
+    pub locked_amount: u64,
+    pub created_at: u64,
+}
+
+#[derive(Clone)]
+pub struct RoyaltyDistributor {
+    royalty_percentage: f32,
+}
+
+impl RoyaltyDistributor {
+    pub fn new(royalty_percentage: f32) -> Self {
+        Self { royalty_percentage }
+    }
+
+    pub fn calculate_royalties(&self, total_revenue: u64) -> (u64, u64) {
+        let royalty = (total_revenue as f32 * self.royalty_percentage) as u64;
+        let remaining = total_revenue - royalty;
+        (royalty, remaining)
+    }
+
+    pub fn distribute_to_experts(&self, expert_revenues: &[(ExpertId, u64)]) -> HashMap<ExpertId, u64> {
+        let total: u64 = expert_revenues.iter().map(|(_, r)| r).sum();
+        
+        expert_revenues
+            .iter()
+            .map(|(expert_id, revenue)| {
+                let share = if total > 0 {
+                    (*revenue as f64 / total as f64 * 1_000_000.0) as u64
+                } else {
+                    0
+                };
+                (*expert_id, share)
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+pub struct SettlementClient {
+    receipts: Arc<RwLock<Vec<UsageReceipt>>>,
+    settlement_config: SettlementConfig,
+    pending_payments: Arc<RwLock<HashMap<String, Payment>>>,
+    escrow_accounts: Arc<RwLock<HashMap<String, EscrowAccount>>>,
+    royalty_distributor: Arc<RoyaltyDistributor>,
 }
 
 impl SettlementClient {
     pub fn new(config: SettlementConfig) -> Self {
         Self {
             receipts: Arc::new(RwLock::new(Vec::new())),
-            settlement_config: config,
+            settlement_config: config.clone(),
+            pending_payments: Arc::new(RwLock::new(HashMap::new())),
+            escrow_accounts: Arc::new(RwLock::new(HashMap::new())),
+            royalty_distributor: Arc::new(RoyaltyDistributor::new(config.royalty_percentage)),
         }
     }
 
@@ -57,7 +131,7 @@ impl SettlementClient {
             expert_ids,
             token_count: usage.tokens_generated,
             timestamp,
-            node_signature: auria_core::Signature([0u8; 64]),
+            node_signature: Signature([0u8; 64]),
         };
 
         self.receipts.write().await.push(receipt.clone());
@@ -156,6 +230,123 @@ impl SettlementClient {
         
         rewards
     }
+
+    pub async fn create_payment(
+        &self,
+        recipient: PublicKey,
+        token_count: u32,
+    ) -> AuriaResult<Payment> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let amount = self.calculate_payment_amount(token_count);
+        
+        let payment = Payment {
+            payment_id: format!("pay_{}", timestamp),
+            recipient,
+            amount,
+            token_count,
+            status: PaymentStatus::Pending,
+            created_at: timestamp,
+            settled_at: None,
+        };
+
+        let payment_id = payment.payment_id.clone();
+        self.pending_payments.write().await.insert(payment_id, payment.clone());
+        
+        Ok(payment)
+    }
+
+    pub async fn process_payment(&self, payment_id: &str) -> AuriaResult<Payment> {
+        let mut payments = self.pending_payments.write().await;
+        
+        if let Some(payment) = payments.get_mut(payment_id) {
+            payment.status = PaymentStatus::Processing;
+            
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            
+            payment.status = PaymentStatus::Completed;
+            payment.settled_at = Some(timestamp);
+            
+            Ok(payment.clone())
+        } else {
+            Err(AuriaError::ExecutionError("Payment not found".to_string()))
+        }
+    }
+
+    pub async fn create_escrow(
+        &self,
+        owner: PublicKey,
+        initial_balance: u64,
+    ) -> AuriaResult<EscrowAccount> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let account_id = format!("escrow_{}", timestamp);
+        
+        let account = EscrowAccount {
+            account_id: account_id.clone(),
+            owner,
+            balance: initial_balance,
+            locked_amount: 0,
+            created_at: timestamp,
+        };
+
+        self.escrow_accounts.write().await.insert(account_id, account.clone());
+        
+        Ok(account)
+    }
+
+    pub async fn lock_funds(&self, account_id: &str, amount: u64) -> AuriaResult<()> {
+        let mut accounts = self.escrow_accounts.write().await;
+        
+        if let Some(account) = accounts.get_mut(account_id) {
+            if account.balance >= amount {
+                account.balance -= amount;
+                account.locked_amount += amount;
+                Ok(())
+            } else {
+                Err(AuriaError::ExecutionError("Insufficient funds".to_string()))
+            }
+        } else {
+            Err(AuriaError::ExecutionError("Account not found".to_string()))
+        }
+    }
+
+    pub async fn release_funds(&self, account_id: &str, amount: u64) -> AuriaResult<()> {
+        let mut accounts = self.escrow_accounts.write().await;
+        
+        if let Some(account) = accounts.get_mut(account_id) {
+            if account.locked_amount >= amount {
+                account.locked_amount -= amount;
+                account.balance += amount;
+                Ok(())
+            } else {
+                Err(AuriaError::ExecutionError("Insufficient locked funds".to_string()))
+            }
+        } else {
+            Err(AuriaError::ExecutionError("Account not found".to_string()))
+        }
+    }
+
+    pub fn calculate_payment_amount(&self, token_count: u32) -> u64 {
+        (token_count as f64 * self.settlement_config.token_price_usd * 1_000_000.0) as u64
+    }
+
+    pub fn calculate_royalty_split(&self, total_revenue: u64) -> (u64, u64) {
+        self.royalty_distributor.calculate_royalties(total_revenue)
+    }
+
+    pub async fn distribute_royalties(&self, expert_revenues: &[(ExpertId, u64)]) -> HashMap<ExpertId, u64> {
+        self.royalty_distributor.distribute_to_experts(expert_revenues)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -211,14 +402,14 @@ mod tests {
                 expert_ids: vec![],
                 token_count: 100,
                 timestamp: 1000,
-                node_signature: auria_core::Signature([0u8; 64]),
+                node_signature: Signature([0u8; 64]),
             },
             UsageReceipt {
                 request_id: RequestId([2u8; 16]),
                 expert_ids: vec![],
                 token_count: 200,
                 timestamp: 2000,
-                node_signature: auria_core::Signature([0u8; 64]),
+                node_signature: Signature([0u8; 64]),
             },
         ];
 
@@ -226,5 +417,70 @@ mod tests {
         let root = client.build_merkle_tree_internal(&receipts).unwrap();
         
         assert_ne!(root.0, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_royalty_calculation() {
+        let distributor = RoyaltyDistributor::new(0.05);
+        let (royalty, remaining) = distributor.calculate_royalties(1_000_000);
+        
+        assert_eq!(royalty, 50000);
+        assert_eq!(remaining, 950000);
+    }
+
+    #[test]
+    fn test_expert_royalty_distribution() {
+        let distributor = RoyaltyDistributor::new(0.05);
+        
+        let expert1 = ExpertId([1u8; 32]);
+        let expert2 = ExpertId([2u8; 32]);
+        
+        let revenues = vec![
+            (expert1, 600_000),
+            (expert2, 400_000),
+        ];
+        
+        let distribution = distributor.distribute_to_experts(&revenues);
+        
+        assert_eq!(distribution.get(&expert1), Some(&600_000));
+        assert_eq!(distribution.get(&expert2), Some(&400_000));
+    }
+
+    #[tokio::test]
+    async fn test_payment_creation() {
+        let client = SettlementClient::new(SettlementConfig::default());
+        let recipient = PublicKey([0u8; 32]);
+        
+        let payment = client.create_payment(recipient, 100).await.unwrap();
+        
+        assert_eq!(payment.token_count, 100);
+        assert_eq!(payment.status, PaymentStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_escrow_creation() {
+        let client = SettlementClient::new(SettlementConfig::default());
+        let owner = PublicKey([0u8; 32]);
+        
+        let account = client.create_escrow(owner, 10_000).await.unwrap();
+        
+        assert_eq!(account.balance, 10_000);
+        assert_eq!(account.locked_amount, 0);
+    }
+
+    #[tokio::test]
+    async fn test_escrow_lock_release() {
+        let client = SettlementClient::new(SettlementConfig::default());
+        let owner = PublicKey([0u8; 32]);
+        
+        let account = client.create_escrow(owner, 10_000).await.unwrap();
+        
+        client.lock_funds(&account.account_id, 5_000).await.unwrap();
+        
+        let accounts = client.escrow_accounts.read().await;
+        let updated = accounts.get(&account.account_id).unwrap();
+        
+        assert_eq!(updated.balance, 5_000);
+        assert_eq!(updated.locked_amount, 5_000);
     }
 }
