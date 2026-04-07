@@ -5,7 +5,7 @@
 //     Generates usage receipts and builds Merkle trees for settlement proof,
 //     enabling economic attribution and royalty distribution.
 //
-use auria_core::{AuriaError, AuriaResult, Hash, RequestId, ShardId, UsageReceipt, UsageStats, ExpertId, PublicKey, Signature};
+use auria_core::{AuriaError, AuriaResult, Hash, RequestId, UsageReceipt, UsageStats, ExpertId, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
@@ -89,7 +89,7 @@ impl RoyaltyDistributor {
                 } else {
                     0
                 };
-                (*expert_id, share)
+                (expert_id.clone(), share)
             })
             .collect()
     }
@@ -365,7 +365,7 @@ pub struct MerkleProof {
 
 impl MerkleProof {
     pub fn verify(&self, root: &Hash) -> bool {
-        let mut current = self.leaf_hash;
+        let mut current = self.leaf_hash.clone();
         
         for (i, proof_hash) in self.proof_hashes.iter().enumerate() {
             let is_left = (self.leaf_index >> i) & 1 == 0;
