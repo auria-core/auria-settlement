@@ -10,6 +10,7 @@ description = "AURIA Runtime Core - Usage accounting and settlement"
 [dependencies]
 auria-core = { path = "../auria-core", version = "0.1.0"}
 auria-security = { path = "../auria-security", version = "0.1.0"}
+auria-blockchain = { path = "../auria-blockchain", version = "0.1.0"}
 anyhow = "1.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -17,3 +18,4 @@ serde_json = "1.0"
 sha3 = "0.10"
 tokio = { version = "1.35", features = ["sync"] }
 hex = "0.4"
+uuid = { version = "1", features = ["v4"] }

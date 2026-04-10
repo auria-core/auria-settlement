@@ -5,6 +5,8 @@
 //     Generates usage receipts and builds Merkle trees for settlement proof,
 //     enabling economic attribution and royalty distribution.
 //
+pub mod blockchain;
+
 use auria_core::{AuriaError, AuriaResult, Hash, RequestId, UsageReceipt, UsageStats, ExpertId, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -12,6 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub use blockchain::{OnChainSettlement, OnChainSettlementConfig, OnChainSettlementStatus, SettlementSubmission, SettlementSubmissionStatus};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SettlementConfig {
