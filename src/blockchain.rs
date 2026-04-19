@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use sha3::{Digest, Keccak256};
+use tracing;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OnChainSettlementConfig {
@@ -153,6 +154,8 @@ impl OnChainSettlement {
         };
 
         let last_submission = self.submissions.read().await.last().cloned();
+        
+        let block_number = self.eth_client.eth_block_number().await.ok();
 
         let pending_rewards = if self.is_connected().await {
             self.settlement_contract.get_reward(&self.wallet.address()).await
@@ -169,8 +172,7 @@ impl OnChainSettlement {
             contract_address: self.config.settlement_contract_address.clone(),
             pending_receipts: pending_count,
             total_settled,
-            last_settlement_block: last_submission.as_ref()
-                .and_then(|s| self.eth_client.eth_block_number().ok()),
+            last_settlement_block: last_submission.as_ref().and(Some(block_number)).flatten(),
             last_settlement_time: last_submission.map(|s| s.submitted_at),
             pending_rewards,
         })
@@ -371,7 +373,7 @@ impl OnChainSettlement {
         let mut data = Vec::new();
         for receipt in receipts {
             data.extend_from_slice(&receipt.request_id.0);
-            data.extend_from_slice(receipt.token_count.to_le_bytes());
+            data.extend_from_slice(&receipt.token_count.to_le_bytes());
         }
 
         let sig = self.wallet.sign_message(&data);
@@ -409,12 +411,6 @@ impl OnChainSettlement {
         }
 
         self.eth_client.eth_get_balance(&self.wallet.address()).await
-    }
-}
-
-impl Default for OnChainSettlementConfig {
-    fn default() -> Self {
-        Self::default()
     }
 }
 

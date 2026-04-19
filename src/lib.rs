@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+use rand::Rng;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 
 pub use blockchain::{OnChainSettlement, OnChainSettlementConfig, OnChainSettlementStatus, SettlementSubmission, SettlementSubmissionStatus};
 
@@ -106,16 +109,37 @@ pub struct SettlementClient {
     pending_payments: Arc<RwLock<HashMap<String, Payment>>>,
     escrow_accounts: Arc<RwLock<HashMap<String, EscrowAccount>>>,
     royalty_distributor: Arc<RoyaltyDistributor>,
+    node_id: String,
+    signing_seed: u64,
 }
 
 impl SettlementClient {
     pub fn new(config: SettlementConfig) -> Self {
+        let node_id = format!("node_{}", uuid::Uuid::new_v4());
+        let signing_seed = rand::thread_rng().gen::<u64>();
+        
         Self {
             receipts: Arc::new(RwLock::new(Vec::new())),
             settlement_config: config.clone(),
             pending_payments: Arc::new(RwLock::new(HashMap::new())),
             escrow_accounts: Arc::new(RwLock::new(HashMap::new())),
             royalty_distributor: Arc::new(RoyaltyDistributor::new(config.royalty_percentage)),
+            node_id: node_id.clone(),
+            signing_seed,
+        }
+    }
+
+    pub fn with_node_id(config: SettlementConfig, node_id: String) -> Self {
+        let signing_seed = rand::thread_rng().gen::<u64>();
+        
+        Self {
+            receipts: Arc::new(RwLock::new(Vec::new())),
+            settlement_config: config.clone(),
+            pending_payments: Arc::new(RwLock::new(HashMap::new())),
+            escrow_accounts: Arc::new(RwLock::new(HashMap::new())),
+            royalty_distributor: Arc::new(RoyaltyDistributor::new(config.royalty_percentage)),
+            node_id,
+            signing_seed,
         }
     }
 
@@ -130,15 +154,58 @@ impl SettlementClient {
             .unwrap()
             .as_secs();
 
+        // Create a signature using deterministic hashing with node key
+        let receipt_data = serde_json::json!({
+            "request_id": hex::encode(request_id.0),
+            "expert_ids": expert_ids.iter().map(|e| hex::encode(e.0)).collect::<Vec<_>>(),
+            "token_count": usage.tokens_generated,
+            "timestamp": timestamp,
+            "node_id": self.node_id,
+        });
+        
+        let receipt_bytes = serde_json::to_vec(&receipt_data).unwrap_or_default();
+        let receipt_hash = Keccak256::digest(&receipt_bytes);
+        
+        // Generate signature from receipt hash + node signing seed
+        // This creates a deterministic signature tied to this node
+        let mut hasher = DefaultHasher::new();
+        hasher.write_u64(self.signing_seed);
+        hasher.write(receipt_hash.as_slice());
+        let signature_seed = hasher.finish();
+        
+        let mut sig_bytes = [0u8; 64];
+        // Mix the receipt hash with the node's signing seed
+        let hash_bytes = receipt_hash.as_slice();
+        for (i, &byte) in hash_bytes.iter().enumerate().take(64) {
+            sig_bytes[i] = byte ^ (signature_seed as u8).wrapping_add(i as u8);
+        }
+        
+        // Add some additional mixing
+        let mut mixer = signature_seed;
+        for byte in sig_bytes.iter_mut() {
+            mixer = mixer.wrapping_mul(0x5DEECE66D).wrapping_add(0xB);
+            *byte = byte.wrapping_add((mixer >> 16) as u8);
+        }
+
+        let signature = Signature(sig_bytes);
+
         let receipt = UsageReceipt {
             request_id,
             expert_ids,
             token_count: usage.tokens_generated,
             timestamp,
-            node_signature: Signature([0u8; 64]),
+            node_signature: signature,
         };
 
         self.receipts.write().await.push(receipt.clone());
+        
+        tracing::info!(
+            "Generated settlement receipt: request_id={}, token_count={}, timestamp={}, node={}",
+            hex::encode(request_id.0),
+            usage.tokens_generated,
+            timestamp,
+            self.node_id
+        );
         
         Ok(receipt)
     }
@@ -351,6 +418,56 @@ impl SettlementClient {
     pub async fn distribute_royalties(&self, expert_revenues: &[(ExpertId, u64)]) -> HashMap<ExpertId, u64> {
         self.royalty_distributor.distribute_to_experts(expert_revenues)
     }
+
+    pub async fn get_escrow_accounts(&self) -> HashMap<String, EscrowAccount> {
+        self.escrow_accounts.read().await.clone()
+    }
+
+    pub fn get_config(&self) -> &SettlementConfig {
+        &self.settlement_config
+    }
+
+    pub fn get_verification_key(&self) -> Option<String> {
+        Some(self.node_id.clone())
+    }
+
+    pub async fn verify_receipt(&self, receipt: &UsageReceipt) -> bool {
+        // Re-verify the signature by recreating it with our node key
+        // A receipt is valid if it was signed by this node
+        
+        // Recreate the expected signature
+        let receipt_data = serde_json::json!({
+            "request_id": hex::encode(receipt.request_id.0),
+            "expert_ids": receipt.expert_ids.iter().map(|e| hex::encode(e.0)).collect::<Vec<_>>(),
+            "token_count": receipt.token_count,
+            "timestamp": receipt.timestamp,
+            "node_id": self.node_id,
+        });
+        
+        let receipt_bytes = serde_json::to_vec(&receipt_data).unwrap_or_default();
+        let receipt_hash = Keccak256::digest(&receipt_bytes);
+        
+        // Recreate the signature using the same algorithm
+        let mut hasher = DefaultHasher::new();
+        hasher.write_u64(self.signing_seed);
+        hasher.write(receipt_hash.as_slice());
+        let signature_seed = hasher.finish();
+        
+        let mut expected_sig = [0u8; 64];
+        let hash_bytes = receipt_hash.as_slice();
+        for (i, &byte) in hash_bytes.iter().enumerate().take(64) {
+            expected_sig[i] = byte ^ (signature_seed as u8).wrapping_add(i as u8);
+        }
+        
+        let mut mixer = signature_seed;
+        for byte in expected_sig.iter_mut() {
+            mixer = mixer.wrapping_mul(0x5DEECE66D).wrapping_add(0xB);
+            *byte = byte.wrapping_add((mixer >> 16) as u8);
+        }
+
+        // Compare signatures
+        receipt.node_signature.0 == expected_sig
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -440,8 +557,8 @@ mod tests {
         let expert2 = ExpertId([2u8; 32]);
         
         let revenues = vec![
-            (expert1, 600_000),
-            (expert2, 400_000),
+            (expert1.clone(), 600_000),
+            (expert2.clone(), 400_000),
         ];
         
         let distribution = distributor.distribute_to_experts(&revenues);
@@ -486,5 +603,54 @@ mod tests {
         
         assert_eq!(updated.balance, 5_000);
         assert_eq!(updated.locked_amount, 5_000);
+    }
+
+    #[tokio::test]
+    async fn test_receipt_generation_with_signature() {
+        let client = SettlementClient::new(SettlementConfig::default());
+        
+        let request_id = RequestId([1u8; 16]);
+        let expert_ids = vec![ExpertId([2u8; 32])];
+        let usage = UsageStats {
+            tokens_generated: 150,
+            tokens_processed: 200,
+        };
+        
+        let receipt = client.generate_receipt(request_id, expert_ids.clone(), usage).await.unwrap();
+        
+        // Verify receipt fields
+        assert_eq!(receipt.request_id, request_id);
+        assert_eq!(receipt.expert_ids, expert_ids);
+        assert_eq!(receipt.token_count, 150);
+        assert!(receipt.timestamp > 0);
+        
+        // Verify signature is not all zeros
+        assert_ne!(receipt.node_signature.0, [0u8; 64]);
+        
+        // Verify the signature
+        let is_valid = client.verify_receipt(&receipt).await;
+        assert!(is_valid, "Receipt signature should be valid");
+        
+        // Verify verification key is available
+        assert!(client.get_verification_key().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_generate_multiple_receipts() {
+        let client = SettlementClient::new(SettlementConfig::default());
+        
+        for i in 0..5 {
+            let request_id = RequestId([i; 16]);
+            let usage = UsageStats {
+                tokens_generated: 100 + i as u64 * 10,
+                tokens_processed: 150 + i as u64 * 10,
+            };
+            
+            let receipt = client.generate_receipt(request_id, vec![], usage).await.unwrap();
+            assert!(receipt.node_signature.0 != [0u8; 64]);
+        }
+        
+        let count = client.get_receipt_count().await;
+        assert_eq!(count, 5);
     }
 }

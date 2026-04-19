@@ -3,7 +3,6 @@ use auria_settlement::{
     PaymentStatus, EscrowAccount,
 };
 use auria_core::{RequestId, UsageStats, ExpertId, PublicKey};
-use auria_settlement::Payment;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -128,7 +127,7 @@ async fn test_escrow_lock_funds() {
     let result = client.lock_funds(&account.account_id, 5000).await;
     assert!(result.is_ok());
     
-    let accounts = client.escrow_accounts.read().await;
+    let accounts = client.get_escrow_accounts().await;
     let updated = accounts.get(&account.account_id).unwrap();
     
     assert_eq!(updated.balance, 5000);
@@ -147,7 +146,7 @@ async fn test_escrow_release_funds() {
     client.lock_funds(&account.account_id, 5000).await.unwrap();
     client.release_funds(&account.account_id, 2000).await.unwrap();
     
-    let accounts = client.escrow_accounts.read().await;
+    let accounts = client.get_escrow_accounts().await;
     let updated = accounts.get(&account.account_id).unwrap();
     
     assert_eq!(updated.balance, 7000);
@@ -185,8 +184,8 @@ async fn test_expert_distribution() {
     let expert2 = ExpertId([2u8; 32]);
     
     let revenues = vec![
-        (expert1, 600_000),
-        (expert2, 400_000),
+        (expert1.clone(), 600_000),
+        (expert2.clone(), 400_000),
     ];
     
     let distribution = distributor.distribute_to_experts(&revenues);
@@ -202,7 +201,7 @@ async fn test_payment_amount_calculation() {
     
     let amount = client.calculate_payment_amount(100);
     
-    let expected = (100.0 * config.token_price_usd * 1_000_000.0) as u64;
+    let expected = (100.0 * client.get_config().token_price_usd * 1_000_000.0) as u64;
     assert_eq!(amount, expected);
 }
 
@@ -213,7 +212,51 @@ async fn test_royalty_split() {
     
     let (royalty, remaining) = client.calculate_royalty_split(1_000_000);
     
-    let expected_royalty = (1_000_000.0 * config.royalty_percentage) as u64;
+    let expected_royalty = (1_000_000.0 * client.get_config().royalty_percentage) as u64;
     assert_eq!(royalty, expected_royalty);
     assert_eq!(remaining, 1_000_000 - expected_royalty);
+}
+
+#[tokio::test]
+async fn test_receipt_verification() {
+    let config = SettlementConfig::default();
+    let client = SettlementClient::new(config);
+    
+    let request_id = RequestId(Uuid::new_v4().into_bytes());
+    let usage = UsageStats {
+        tokens_generated: 100,
+        tokens_processed: 50,
+    };
+    
+    let receipt = client.generate_receipt(
+        request_id,
+        vec![],
+        usage,
+    ).await.unwrap();
+    
+    let is_valid = client.verify_receipt(&receipt).await;
+    assert!(is_valid);
+}
+
+#[tokio::test]
+async fn test_receipt_with_experts() {
+    let config = SettlementConfig::default();
+    let client = SettlementClient::new(config);
+    
+    let request_id = RequestId(Uuid::new_v4().into_bytes());
+    let expert1 = ExpertId([1u8; 32]);
+    let expert2 = ExpertId([2u8; 32]);
+    let usage = UsageStats {
+        tokens_generated: 200,
+        tokens_processed: 100,
+    };
+    
+    let receipt = client.generate_receipt(
+        request_id,
+        vec![expert1, expert2],
+        usage,
+    ).await.unwrap();
+    
+    assert!(!receipt.expert_ids.is_empty());
+    assert_eq!(receipt.expert_ids.len(), 2);
 }
