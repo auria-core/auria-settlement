@@ -5,7 +5,7 @@
 //     Bridges the settlement layer with Ethereum blockchain for
 //     verifiable usage accounting and royalty distribution.
 
-use auria_core::{AuriaError, AuriaResult, Hash, RequestId, UsageStats, ExpertId, PublicKey, Signature};
+use auria_core::{AuriaError, AuriaResult, RequestId, UsageStats, ExpertId};
 use auria_blockchain::{EthereumClient, Wallet, SettlementContract};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -89,7 +89,6 @@ pub struct OnChainSettlement {
 #[derive(Clone)]
 struct PendingReceipt {
     request_id: RequestId,
-    expert_ids: Vec<ExpertId>,
     token_count: u64,
     timestamp: u64,
 }
@@ -181,14 +180,13 @@ impl OnChainSettlement {
     pub async fn add_receipt(
         &self,
         request_id: RequestId,
-        expert_ids: Vec<ExpertId>,
+        _expert_ids: Vec<ExpertId>,
         usage: UsageStats,
     ) -> AuriaResult<String> {
         let receipt_id = self.generate_receipt_id(&request_id);
         
         let receipt = PendingReceipt {
             request_id,
-            expert_ids,
             token_count: usage.tokens_generated,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
